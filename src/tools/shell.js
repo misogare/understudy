@@ -20,7 +20,9 @@ export function resolveShell() {
     for (const c of candidates) if (existsSync(c)) return (SHELL = { cmd: c, argsFor: (s) => ['-c', s], kind: 'bash' });
     try {
       const p = spawnSync('where.exe', ['bash.exe'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
-      const found = (p.stdout || '').split(/\r?\n/).find((l) => l.trim() && !/WindowsApps/i.test(l));
+      // Skip WindowsApps stubs AND System32\bash.exe (that one is WSL, which
+      // may have no distro installed and has a different filesystem view).
+      const found = (p.stdout || '').split(/\r?\n/).find((l) => l.trim() && !/WindowsApps|\\System32\\/i.test(l));
       if (found) return (SHELL = { cmd: found.trim(), argsFor: (s) => ['-c', s], kind: 'bash' });
     } catch { /* fall through */ }
     return (SHELL = { cmd: 'powershell.exe', argsFor: (s) => ['-NoProfile', '-NonInteractive', '-Command', s], kind: 'powershell' });
@@ -42,7 +44,7 @@ export function toolBash({ command, timeout }, cwd, { onExec } = {}) {
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
-      try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      killTree(child);
       resolve({ error: `command timed out after ${ms}ms\n${clamp(out)}` });
     }, ms);
     child.stdout.on('data', (d) => { out += d.toString('utf8'); });
@@ -65,4 +67,16 @@ function clamp(s) {
   return s.length > MAX_OUTPUT_CHARS
     ? s.slice(0, MAX_OUTPUT_CHARS / 2) + `\n…[${s.length - MAX_OUTPUT_CHARS} chars truncated]…\n` + s.slice(-MAX_OUTPUT_CHARS / 2)
     : s;
+}
+
+// Kill a spawned process AND its descendants. On Windows, child.kill() only
+// terminates the direct child (the shell), orphaning the real worker — use
+// taskkill /T instead.
+export function killTree(child) {
+  if (process.platform === 'win32' && child.pid) {
+    try { spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 10000 }); } catch { /* fall through */ }
+    try { child.kill('SIGKILL'); } catch { /* already dead */ }
+  } else {
+    try { child.kill('SIGKILL'); } catch { /* already dead */ }
+  }
 }

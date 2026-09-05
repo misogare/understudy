@@ -3,12 +3,34 @@
   "version": "0.1.0",
   "description": "Run Claude Code subagents and workflow scripts on any model (GLM, DeepSeek, Gemini, GitHub Models, Ollama, any OpenAI-compatible endpoint) — then hand the results back to Claude Code.",
   "type": "module",
-  "bin": { "understudy": "bin/understudy.js" },
-  "engines": { "node": ">=18.17" },
-  "scripts": {
-    "test": "node --test \"test/*.test.js\""
+  "bin": {
+    "understudy": "bin/understudy.js"
   },
-  "keywords": ["claude-code", "agents", "workflows", "llm", "orchestration", "openai-compatible", "deepseek", "glm", "gemini", "model-agnostic"],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "test": "node --test test/schema.test.js test/journal.test.js test/workflow.test.js test/agentloop.test.js test/tools.test.js test/fixes.test.js"
+  },
+  "keywords": [
+    "claude-code",
+    "agents",
+    "workflows",
+    "llm",
+    "orchestration",
+    "openai-compatible",
+    "deepseek",
+    "glm",
+    "gemini",
+    "model-agnostic"
+  ],
   "license": "MIT",
-  "files": ["bin", "src", "skills", "examples", "README.md", "LICENSE"]
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ]
 }

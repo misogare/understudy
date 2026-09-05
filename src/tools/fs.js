@@ -33,14 +33,36 @@ export function toolEdit({ file_path, old_string, new_string, replace_all }) {
   if (old_string == null || old_string === '') return { error: 'old_string must be a non-empty string' };
   if (old_string === new_string) return { error: 'old_string and new_string are identical' };
   const raw = readFileSync(file_path, 'utf8');
-  const occurrences = raw.split(old_string).length - 1;
+  const isCrlf = raw.includes('\r\n');
+
+  // Read normalizes line endings to LF, so the model's old_string carries
+  // bare \n even for CRLF files. Match verbatim first; if that misses and the
+  // file is CRLF, retry with CRLF-adapted strings.
+  let oldS = old_string;
+  let newS = new_string ?? '';
+  let occurrences = raw.split(oldS).length - 1;
+  if (occurrences === 0 && isCrlf && /(?<!\r)\n/.test(oldS)) {
+    const oldCrlf = oldS.replace(/\r?\n/g, '\r\n');
+    const crlfHits = raw.split(oldCrlf).length - 1;
+    if (crlfHits > 0) {
+      oldS = oldCrlf;
+      newS = newS.replace(/\r?\n/g, '\r\n');
+      occurrences = crlfHits;
+    }
+  }
+  // A verbatim match in a CRLF file: keep the replacement's line endings
+  // consistent with the file so we don't splice in mixed EOLs.
+  if (occurrences > 0 && isCrlf && !oldS.includes('\n') && /(?<!\r)\n/.test(newS)) {
+    newS = newS.replace(/\r?\n/g, '\r\n');
+  }
+
   if (occurrences === 0) return { error: `old_string not found in ${file_path}` };
   if (occurrences > 1 && !replace_all) {
     return { error: `old_string occurs ${occurrences} times in ${file_path}; make it unique or pass replace_all: true` };
   }
   const next = replace_all
-    ? raw.split(old_string).join(new_string ?? '')
-    : raw.replace(old_string, () => new_string ?? ''); // function form: no $-pattern expansion
+    ? raw.split(oldS).join(newS)
+    : raw.replace(oldS, () => newS); // function form: no $-pattern expansion
   writeFileSync(file_path, next, 'utf8');
   return { result: `replaced ${replace_all ? occurrences : 1} occurrence(s) in ${file_path}` };
 }

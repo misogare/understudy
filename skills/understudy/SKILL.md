@@ -24,7 +24,10 @@ or headless agent CLIs (freebuff, gemini, copilot). Runs land in
 3. Launch in the background so you can keep working:
    `understudy run <script.js> --provider <name> --args '<json>'`
    (Bash with run_in_background: true). Add `--read-only` when the workflow
-   should not modify the repo — this is enforced, not just prompted.
+   should not modify the repo — this is enforced, not just prompted, for
+   HTTP providers; CLI providers (freebuff/gemini-cli/copilot-cli) are
+   REFUSED in read-only mode because their tools can't be constrained —
+   pick an HTTP provider for read-only analysis runs.
 4. If a run dies partway, resume without re-paying completed agents:
    `understudy run <script.js> --resume <runId> ...`.
 

@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 
 const SKIP_DIRS = new Set(['node_modules', '.git', '.understudy', '.venv', '__pycache__', 'dist', 'build']);
 const MAX_RESULTS = 250;
-const MAX_FILE_BYTES = 10 * 1024 * 1024;
+const MAX_FILE_BYTES = 32 * 1024 * 1024; // covers 27MB corpus files
 
 // Convert a glob to a RegExp. Supports **, *, ?, {a,b}, [chars].
 export function globToRegex(glob) {
@@ -94,7 +94,7 @@ export function toolGrep({ pattern, path: base, glob, output_mode, '-i': ci, ign
   const insensitive = !!(ci || ignoreCase);
 
   if (useRg()) {
-    const args = ['--no-config', '--max-count', '500', '--max-filesize', '10M'];
+    const args = ['--no-config', '--max-count', '500', '--max-filesize', '32M'];
     if (insensitive) args.push('-i');
     if (glob) args.push('--glob', glob);
     if (mode === 'files_with_matches') args.push('-l');
@@ -116,6 +116,7 @@ export function toolGrep({ pattern, path: base, glob, output_mode, '-i': ci, ign
   const fileFilter = glob ? globToRegex(glob) : null;
   const out = [];
   let total = 0;
+  let skippedLarge = 0;
   const rootIsFile = (() => { try { return statSync(root).isFile(); } catch { return false; } })();
   for (const f of rootIsFile ? [root] : walkFiles(root)) {
     if (fileFilter) {
@@ -124,7 +125,7 @@ export function toolGrep({ pattern, path: base, glob, output_mode, '-i': ci, ign
     }
     let size = 0;
     try { size = statSync(f).size; } catch { continue; }
-    if (size > MAX_FILE_BYTES) continue;
+    if (size > MAX_FILE_BYTES) { skippedLarge++; continue; }
     let text;
     try { text = readFileSync(f, 'utf8'); } catch { continue; }
     if (text.includes('\u0000')) continue; // binary
@@ -144,6 +145,7 @@ export function toolGrep({ pattern, path: base, glob, output_mode, '-i': ci, ign
     }
     if (out.length >= MAX_RESULTS) break;
   }
-  const note = out.length >= MAX_RESULTS ? `\n[result truncated at ${MAX_RESULTS} entries]` : '';
-  return { result: out.length ? out.join('\n') + note : 'No matches.' };
+  let note = out.length >= MAX_RESULTS ? `\n[result truncated at ${MAX_RESULTS} entries]` : '';
+  if (skippedLarge > 0) note += `\n[${skippedLarge} file(s) larger than 32MB skipped — use the Bash tool's grep for those]`;
+  return { result: out.length ? out.join('\n') + note : `No matches.${note}` };
 }

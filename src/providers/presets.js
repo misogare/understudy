@@ -113,7 +113,8 @@ export const PRESETS = {
     //   understudy providers test freebuff
     type: 'cli',
     command: 'freebuff',
-    args: ['--free', '{prompt}'],
+    staticArgs: ['--free'],
+    promptArgs: ['{prompt}'],
     promptVia: 'arg',
     timeoutMs: 900000,
     models: { default: 'cli-default' },
@@ -122,16 +123,20 @@ export const PRESETS = {
     // Google's gemini CLI — works with OAuth login, no API key required.
     type: 'cli',
     command: 'gemini',
-    args: ['-m', '{model}'],
+    modelArgs: ['-m', '{model}'],
     promptVia: 'stdin',
     timeoutMs: 900000,
     models: { default: 'gemini-2.5-flash', high: 'gemini-2.5-pro' },
   },
   'copilot-cli': {
-    // GitHub Copilot CLI in programmatic mode.
+    // GitHub Copilot CLI in programmatic mode. Tool auto-approval is only
+    // granted under --mode full; in workspace mode the CLI's own approval
+    // rules apply (it may refuse or hang until timeout — prefer --mode full
+    // or an HTTP provider for unattended runs).
     type: 'cli',
     command: 'copilot',
-    args: ['-p', '{prompt}', '--allow-all-tools'],
+    promptArgs: ['-p', '{prompt}'],
+    fullModeArgs: ['--allow-all-tools'],
     promptVia: 'arg',
     timeoutMs: 900000,
     models: { default: 'cli-default' },

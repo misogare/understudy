@@ -53,9 +53,12 @@ export function harvest({ dest, claudeDir = null, project = null }) {
   mkdirSync(dest, { recursive: true });
   const copied = [];
   for (const s of unique) {
-    const target = join(dest, `${s.name}.js`);
+    // meta.name comes from the harvested script — sanitize it so a crafted
+    // name can't traverse outside --dest.
+    const safe = s.name.replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[.-]+/, '').slice(0, 80) || 'workflow';
+    const target = join(dest, `${safe}.js`);
     copyFileSync(s.path, target);
-    copied.push({ ...s, target });
+    copied.push({ ...s, name: safe, target });
   }
   return { total: all.length, unique: unique.length, copied };
 }

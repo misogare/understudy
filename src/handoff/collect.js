@@ -40,11 +40,16 @@ export function collectRun(outRoot, runId = null) {
   if (!run) return { error: `run ${runId} not found; latest is ${runs[0].runId}` };
 
   const recordFile = firstRecord(run.dir);
-  const record = recordFile ? JSON.parse(readFileSync(recordFile, 'utf8')) : null;
+  let record = null;
+  let recordError = null;
+  if (recordFile) {
+    try { record = JSON.parse(readFileSync(recordFile, 'utf8')); } catch (e) { recordError = `run record is corrupt (${e.message})`; }
+  }
   const failures = readFailures(join(run.dir, 'journal.jsonl'));
   return {
     run,
     record,
+    recordError,
     failures,
     files: {
       record: recordFile,

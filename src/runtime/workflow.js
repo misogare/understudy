@@ -26,18 +26,20 @@ export class BudgetExceededError extends Error {
 }
 
 // ── meta extraction ─────────────────────────────────────────────────────
-// Find `export const meta = { ... }` and evaluate just the literal.
+// Find `export const meta = { ... }` and STATICALLY parse the literal — no
+// evaluation of any kind, so listing/harvesting untrusted scripts never runs
+// their code. The grammar covers what a "pure literal" means: plain objects
+// with identifier/string keys, arrays, strings ('/"/` without ${), numbers,
+// true/false/null. Computed keys, spreads, calls, template interpolation, or
+// any other expression fail the parse.
 export function extractMeta(source) {
   const m = /export\s+const\s+meta\s*=/.exec(source);
   if (!m) return { meta: null, error: 'script has no `export const meta = {...}` block' };
   const start = source.indexOf('{', m.index + m[0].length);
   if (start === -1) return { meta: null, error: '`export const meta =` is not followed by an object literal' };
-  const end = findBalanced(source, start);
-  if (end === -1) return { meta: null, error: 'could not find the end of the meta object literal' };
-  const literal = source.slice(start, end + 1);
   try {
-    const meta = vm.runInNewContext(`(${literal})`, {}, { timeout: 1000 });
-    if (!meta || typeof meta !== 'object') return { meta: null, error: 'meta did not evaluate to an object' };
+    const [meta] = parseLiteral(source, start);
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return { meta: null, error: 'meta did not parse to an object' };
     if (!meta.name || !meta.description) return { meta, error: 'meta must declare `name` and `description`' };
     return { meta, error: null };
   } catch (e) {
@@ -45,29 +47,99 @@ export function extractMeta(source) {
   }
 }
 
-function findBalanced(src, start) {
-  let depth = 0;
-  let i = start;
-  let inStr = null; // ', ", or `
-  let inLine = false;
-  let inBlock = false;
-  for (; i < src.length; i++) {
-    const c = src[i];
-    const prev = src[i - 1];
-    if (inLine) { if (c === '\n') inLine = false; continue; }
-    if (inBlock) { if (prev === '*' && c === '/') inBlock = false; continue; }
-    if (inStr) {
-      if (c === '\\') { i++; continue; }
-      if (c === inStr) inStr = null;
-      continue;
+// Recursive-descent parser for pure literals. Returns [value, indexAfter].
+function parseLiteral(src, i) {
+  i = skipWs(src, i);
+  const c = src[i];
+  if (c === '{') {
+    const obj = {};
+    i = skipWs(src, i + 1);
+    if (src[i] === '}') return [obj, i + 1];
+    for (;;) {
+      i = skipWs(src, i);
+      let key;
+      if (src[i] === '"' || src[i] === "'" || src[i] === '`') {
+        [key, i] = parseString(src, i);
+      } else {
+        const km = /^[A-Za-z_$][\w$]*/.exec(src.slice(i, i + 200));
+        if (!km) throw err(src, i, 'expected a property key');
+        key = km[0]; i += km[0].length;
+      }
+      i = skipWs(src, i);
+      if (src[i] !== ':') throw err(src, i, 'expected ":" after key (computed keys/shorthand are not literals)');
+      let value;
+      [value, i] = parseLiteral(src, i + 1);
+      obj[key] = value;
+      i = skipWs(src, i);
+      if (src[i] === ',') { i = skipWs(src, i + 1); if (src[i] === '}') return [obj, i + 1]; continue; }
+      if (src[i] === '}') return [obj, i + 1];
+      throw err(src, i, 'expected "," or "}"');
     }
-    if (c === '/' && src[i + 1] === '/') { inLine = true; continue; }
-    if (c === '/' && src[i + 1] === '*') { inBlock = true; continue; }
-    if (c === "'" || c === '"' || c === '`') { inStr = c; continue; }
-    if (c === '{') depth++;
-    else if (c === '}') { depth--; if (depth === 0) return i; }
   }
-  return -1;
+  if (c === '[') {
+    const arr = [];
+    i = skipWs(src, i + 1);
+    if (src[i] === ']') return [arr, i + 1];
+    for (;;) {
+      let value;
+      [value, i] = parseLiteral(src, i);
+      arr.push(value);
+      i = skipWs(src, i);
+      if (src[i] === ',') { i = skipWs(src, i + 1); if (src[i] === ']') return [arr, i + 1]; continue; }
+      if (src[i] === ']') return [arr, i + 1];
+      throw err(src, i, 'expected "," or "]"');
+    }
+  }
+  if (c === '"' || c === "'" || c === '`') return parseString(src, i);
+  const num = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/.exec(src.slice(i, i + 40));
+  if (num) return [Number(num[0]), i + num[0].length];
+  if (src.startsWith('true', i)) return [true, i + 4];
+  if (src.startsWith('false', i)) return [false, i + 5];
+  if (src.startsWith('null', i)) return [null, i + 4];
+  throw err(src, i, 'not a literal value (calls, spreads, identifiers and interpolation are not allowed in meta)');
+}
+
+function parseString(src, i) {
+  const quote = src[i];
+  let out = '';
+  for (i += 1; i < src.length; i++) {
+    const c = src[i];
+    if (c === '\\') {
+      const n = src[i + 1];
+      if (n === 'u') {
+        if (src[i + 2] === '{') throw err(src, i, 'unsupported \\u{...} escape in meta');
+        const code = parseInt(src.slice(i + 2, i + 6), 16);
+        if (Number.isNaN(code)) throw err(src, i, 'bad \\u escape');
+        out += String.fromCharCode(code); i += 5; continue;
+      }
+      if (n === 'x') {
+        const code = parseInt(src.slice(i + 2, i + 4), 16);
+        if (Number.isNaN(code)) throw err(src, i, 'bad \\x escape');
+        out += String.fromCharCode(code); i += 3; continue;
+      }
+      const map = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', v: '\v' };
+      out += map[n] !== undefined ? map[n] : (n ?? '');
+      i += 1; continue;
+    }
+    if (c === quote) return [out, i + 1];
+    if (quote === '`' && c === '$' && src[i + 1] === '{') throw err(src, i, 'template interpolation is not a literal');
+    if (quote !== '`' && (c === '\n' || c === '\r')) throw err(src, i, 'unterminated string');
+    out += c;
+  }
+  throw err(src, i, 'unterminated string');
+}
+
+function skipWs(src, i) {
+  for (;;) {
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src[i] === '/' && src[i + 1] === '/') { while (i < src.length && src[i] !== '\n') i++; continue; }
+    if (src[i] === '/' && src[i + 1] === '*') { const end = src.indexOf('*/', i + 2); i = end === -1 ? src.length : end + 2; continue; }
+    return i;
+  }
+}
+
+function err(src, i, msg) {
+  return new Error(`${msg} at offset ${i}: ...${src.slice(Math.max(0, i - 20), i + 20).replace(/\n/g, '\\n')}...`);
 }
 
 // ── guarded intrinsics (mirror Claude Code's restrictions) ──────────────
@@ -109,6 +181,9 @@ export async function runWorkflow({
   const { meta, error: metaError } = extractMeta(source);
   if (metaError && !meta) throw new Error(metaError);
   if (metaError) onLog(`warning: ${metaError}`);
+  if (provider.type === 'cli' && mode === 'read-only') {
+    throw new Error('read-only mode cannot be enforced for CLI providers — their tools run outside understudy. Use an HTTP provider or drop --read-only.');
+  }
 
   const runDir = join(outRoot, runId);
   mkdirSync(join(runDir, 'agents'), { recursive: true });
@@ -150,6 +225,8 @@ export async function runWorkflow({
 
     const cached = st.journal.lookup(key);
     if (cached !== undefined) {
+      // Re-emit into THIS run's journal so chained resumes stay complete.
+      st.journal.result(key, 'cached', cached);
       onLog(`[${phaseName || '-'}] ${label}: cached (resume)`);
       return cached;
     }
@@ -167,10 +244,14 @@ export async function runWorkflow({
         if (def) agentBody = def.body;
         else onLog(`warning: agentType "${opts.agentType}" not found in .claude/agents — running without it`);
       }
-      const toolset = buildToolset({ cwd, mode, allowPaths: config.allowPaths || [], config, onEvent: () => { st.toolCalls += 1; } });
+      const toolset = buildToolset({
+        cwd, mode, allowPaths: config.allowPaths || [], config,
+        // 'bash' events are sub-events of a Bash tool call — don't double-count.
+        onEvent: (e) => { if (!e || e.type !== 'bash') st.toolCalls += 1; },
+      });
       const out = await runAgentLoop({
         prompt, label, schema: opts.schema, provider, model, effort,
-        toolset, cwd,
+        toolset, cwd, mode,
         maxTurns: maxTurns || config.maxTurnsPerAgent || undefined,
         clampChars: config.toolResultClampChars || undefined,
         transcriptPath: join(runDir, 'agents', `${agentId}.jsonl`),
@@ -195,14 +276,23 @@ export async function runWorkflow({
     }
   }
 
+  // Spec conformance: a throwing thunk/stage resolves its lane to null and
+  // parallel()/pipeline() themselves never reject — including on budget
+  // exhaustion (agent() throws, the lane nulls, and we log why once).
+  let budgetWarned = false;
+  const laneCatch = (e) => {
+    if (e instanceof BudgetExceededError && !budgetWarned) {
+      budgetWarned = true;
+      log(`warning: ${e.message} — remaining lanes resolve to null`);
+    }
+    return null;
+  };
+
   async function parallelFn(thunks) {
     if (!Array.isArray(thunks)) throw new Error('parallel() takes an array of zero-argument functions');
     if (thunks.length > 4096) throw new Error('parallel() accepts at most 4096 items');
     return Promise.all(thunks.map(async (t) => {
-      try { return await t(); } catch (e) {
-        if (e instanceof BudgetExceededError) throw e;
-        return null;
-      }
+      try { return await t(); } catch (e) { return laneCatch(e); }
     }));
   }
 
@@ -215,8 +305,7 @@ export async function runWorkflow({
         try {
           prev = await stage(prev, item, index);
         } catch (e) {
-          if (e instanceof BudgetExceededError) throw e;
-          return null;
+          return laneCatch(e);
         }
       }
       return prev;
@@ -254,11 +343,14 @@ export async function runWorkflow({
     workflow: workflowFn,
     console: { log: (...a) => log(a.map(String).join(' ')), error: (...a) => log(a.map(String).join(' ')), warn: (...a) => log(a.map(String).join(' ')) },
     setTimeout, clearTimeout, setInterval, clearInterval,
+    // Guarded shadows only — everything else (JSON, Promise, Array, Error,
+    // parseInt, ...) comes from the vm realm's own intrinsics. Injecting host
+    // intrinsics would both mix realms (instanceof surprises) and widen the
+    // escape surface. NOTE (documented in README): node:vm is NOT a security
+    // boundary — running a workflow script is running code; only run scripts
+    // you trust.
     Math: makeGuardedMath(),
     Date: GuardedDate,
-    JSON, Promise, Array, Object, String, Number, Boolean, RegExp, Map, Set,
-    Error, TypeError, RangeError, SyntaxError,
-    isNaN, isFinite, parseInt, parseFloat, encodeURIComponent, decodeURIComponent,
     structuredClone: globalThis.structuredClone,
     URL, TextEncoder, TextDecoder,
   };

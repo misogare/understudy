@@ -108,14 +108,20 @@ The same contract Claude Code documents, faithfully:
   agent-call hashes must be stable across resumes.
 - `journal.jsonl` uses Claude Code's format (`v2:<sha256>` content-hash keys)
   — `--resume <runId>` replays completed agents instantly and re-runs only
-  what changed. (Hashes are self-consistent within Understudy, not
-  byte-identical to Claude's.)
+  what changed. Cache hits are re-emitted into the new run's journal, so
+  resume chains (A → B → C) stay complete. (Hashes are self-consistent
+  within Understudy, not byte-identical to Claude's.)
 
 Honest differences: `effort` maps to your provider's model tiers
 (`models: {low, default, high}`) rather than Claude reasoning effort;
 `opts.model` with a Claude name ("opus", "sonnet") maps to those tiers too;
 CLI providers report 0 tokens so `budget` only constrains HTTP providers;
-`agentType` resolves against `.claude/agents/*.md` on disk.
+`agentType` resolves against `.claude/agents/*.md` on disk; resume is
+content-addressed (any unchanged `(prompt, opts)` call replays, not just an
+unchanged prefix — strictly more cache hits, never stale for the prompt
+actually sent); and budget exhaustion inside `parallel()`/`pipeline()`
+resolves the remaining lanes to `null` (with a logged warning) instead of
+rejecting, per the documented lane semantics.
 
 ## Handoff: letting Claude take over
 
@@ -148,11 +154,17 @@ agents as missing lanes rather than empty results.
 The corpus of real Claude workflows enforces safety by prompt text only
 ("STRICTLY READ-ONLY..."). Understudy adds an enforced policy:
 
-- `--read-only` — no Write/Edit/Bash tools at all.
-- `workspace` (default) — Write/Edit confined to the working directory;
-  Bash available but **not** confined (it's a policy default, not a sandbox —
-  don't run untrusted workflows against models you don't trust).
-- `--mode full` — no confinement.
+- `--read-only` — no Write/Edit/Bash tools at all. Refused for CLI providers
+  (their tools run outside Understudy and can't be constrained — that
+  refusal is deliberate: no silent downgrade of the guarantee).
+- `workspace` (default) — Write/Edit confined to the working directory
+  (checked against real paths, so symlinks/junctions can't redirect writes
+  outside); Bash available but **not** confined (a policy default, not a
+  sandbox). CLI providers get the confinement as prompt instructions only.
+- `--mode full` — no confinement; also the only mode that passes
+  auto-approval flags (e.g. copilot's `--allow-all-tools`) to CLI providers.
+
+An unrecognized `--mode` value is an error, never a silent fallback.
 
 ## Single agents
 
@@ -166,12 +178,21 @@ as the system-prompt extension and its `model:` field via the tier mapping.
 
 ## Security notes
 
-- Keys belong in env vars (`apiKeyEnv`); `understudy.config.json` is
-  gitignored by default because `init --from-continue` may copy inline keys
-  from Continue's config — move them to env vars when you can.
+- **A workflow script is code.** `understudy run` executes it with your
+  privileges — node:vm is not a security boundary, and `--read-only`
+  constrains the *model's tools*, not the script itself. Only run scripts
+  you wrote or read. (Listing/harvesting is safe: meta blocks are parsed
+  statically, never evaluated.)
+- Keys belong in env vars (`apiKeyEnv`). `init` adds
+  `understudy.config.json` and `.understudy/` to your project's .gitignore
+  because `init --from-continue` may copy inline keys from Continue's
+  config — still, move them to env vars when you can.
 - A model with the Bash tool can run arbitrary commands in your workspace.
   Use `--read-only` for analysis workflows, and prefer trusted providers for
   anything with write access.
+- On Windows, npm-shim CLIs (.cmd) must run under cmd.exe; Understudy
+  therefore never passes prompt content through the shell — it goes via
+  stdin — and refuses config args containing cmd metacharacters.
 - Treat model output as untrusted data everywhere downstream.
 
 ## Limitations (v0.1)

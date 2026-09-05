@@ -105,6 +105,17 @@ function normalize(data) {
         ? tc.function.arguments
         : JSON.stringify(tc.function.arguments ?? {}),
     }));
+  // Rebuild the assistant message we echo back into the conversation from
+  // the NORMALIZED tool calls: synthesized ids stay consistent with the
+  // role:tool replies, entries we filtered out don't linger unanswered, and
+  // provider-specific extras (e.g. reasoning_content) are not sent back.
+  const assistantMessage = {
+    role: 'assistant',
+    content: typeof msg.content === 'string' || msg.content == null ? (msg.content ?? null) : contentToText(msg.content),
+    ...(toolCalls.length ? {
+      tool_calls: toolCalls.map((tc) => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: tc.args } })),
+    } : {}),
+  };
   return {
     text: contentToText(msg.content),
     reasoning: msg.reasoning_content || null, // DeepSeek R1-style field, informational only
@@ -114,6 +125,6 @@ function normalize(data) {
       input: data.usage?.prompt_tokens ?? 0,
       output: data.usage?.completion_tokens ?? 0,
     },
-    assistantMessage: msg, // pushed back verbatim so tool_call ids stay consistent
+    assistantMessage,
   };
 }

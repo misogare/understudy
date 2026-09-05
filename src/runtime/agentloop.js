@@ -17,7 +17,7 @@ const MAX_TURNS_DEFAULT = 40;
 const CLAMP_CHARS_DEFAULT = 30000;
 const SCHEMA_NUDGES = 2;
 
-export function buildSystemPrompt({ toolset, schema, cwd, label, agentBody, delegated }) {
+export function buildSystemPrompt({ toolset, schema, cwd, label, agentBody, delegated, mode = 'workspace' }) {
   const lines = [];
   lines.push(`You are "${label || 'subagent'}", an autonomous subagent inside an automated workflow (run by Understudy, a model-agnostic runner for Claude Code-style workflows).`);
   lines.push('You are not talking to a human. Your final output is machine-read as your return value.');
@@ -28,6 +28,8 @@ export function buildSystemPrompt({ toolset, schema, cwd, label, agentBody, dele
   lines.push('Rules:');
   if (delegated) {
     lines.push('- Use your own tools to inspect files and do the work in the working directory.');
+    if (mode === 'read-only') lines.push('- READ-ONLY: do NOT create, modify or delete any file, and do not run state-changing commands.');
+    else if (mode === 'workspace') lines.push('- Only create or modify files INSIDE the working directory; never outside it.');
   } else {
     const names = toolset.defs.map((d) => d.function.name).filter((n) => n !== 'StructuredOutput');
     lines.push(`- Use the provided function tools to inspect files and do the work: ${names.join(', ')}.`);
@@ -60,6 +62,7 @@ export async function runAgentLoop(opts) {
     maxTurns = MAX_TURNS_DEFAULT, clampChars = CLAMP_CHARS_DEFAULT,
     transcriptPath = null, usage, agentBody = null, temperature,
   } = opts;
+  const mode = opts.mode || (toolset && toolset.mode) || 'workspace';
 
   const record = (ev) => {
     if (!transcriptPath) return;
@@ -67,7 +70,15 @@ export async function runAgentLoop(opts) {
   };
   record({ type: 'start', label, model, effort, provider: provider.name, promptChars: prompt.length });
 
-  if (provider.type === 'cli') return runDelegated(opts, record);
+  if (provider.type === 'cli') {
+    if (mode === 'read-only') {
+      // Understudy cannot constrain an external CLI's tools; refuse rather
+      // than silently dropping the guarantee.
+      record({ type: 'error', error: 'read-only mode with a CLI provider' });
+      return { ok: false, terminal: true, error: 'read-only mode cannot be enforced for CLI providers — use an HTTP provider or drop --read-only', text: '' };
+    }
+    return runDelegated({ ...opts, mode }, record);
+  }
 
   const system = buildSystemPrompt({ toolset, schema, cwd, label, agentBody, delegated: false });
   const tools = [...toolset.defs];
@@ -113,6 +124,11 @@ export async function runAgentLoop(opts) {
           continue;
         }
         if (call.name === 'StructuredOutput') {
+          if (!schema) {
+            // Hallucinated call — no schema was requested; never accept it as the answer.
+            messages.push(toolMsg(call.id, 'ERROR: no structured output was requested for this task. Finish with a normal text answer instead.'));
+            continue;
+          }
           const errors = validate(schema, args);
           if (errors.length === 0) {
             record({ type: 'done', via: 'structured', turns: turn + 1 });
@@ -164,14 +180,16 @@ export async function runAgentLoop(opts) {
 }
 
 async function runDelegated(opts, record) {
-  const { prompt, label, schema, provider, model, cwd, usage, agentBody, onExec } = opts;
-  const system = buildSystemPrompt({ toolset: null, schema, cwd, label, agentBody, delegated: true });
-  const composed = `${system}\n\n--- Task ---\n${prompt}`;
+  const { prompt, label, schema, provider, model, cwd, usage, agentBody, onExec, mode } = opts;
+  const system = buildSystemPrompt({ toolset: null, schema, cwd, label, agentBody, delegated: true, mode });
+  // Rebuilt EVERY attempt so validation feedback actually reaches the CLI.
+  let taskPrompt = prompt;
 
   for (let attempt = 0; attempt < 2; attempt++) {
+    const composed = `${system}\n\n--- Task ---\n${taskPrompt}`;
     let out;
     try {
-      out = await provider.client.run({ prompt: composed, model, cwd, onExec });
+      out = await provider.client.run({ prompt: composed, model, cwd, onExec, mode });
     } catch (e) {
       record({ type: 'error', error: String(e.message) });
       return { ok: false, error: `CLI provider error: ${e.message}`, terminal: true, text: '' };
@@ -189,7 +207,7 @@ async function runDelegated(opts, record) {
     if (errors.length === 0) { record({ type: 'done', via: 'cli-json' }); return { ok: true, value, text: out.text }; }
     record({ type: 'schema-reject', errors: errors.slice(0, 10) });
     if (attempt === 0) {
-      opts = { ...opts, prompt: `${prompt}\n\nYour previous output did not contain valid JSON for the required schema (${errors.slice(0, 5).join('; ')}). Previous output (may be truncated):\n${clip(out.text, 4000)}\n\nRedo the final answer: reply with ONLY a fenced json code block that validates against the schema.` };
+      taskPrompt = `${prompt}\n\nYour previous output did not contain valid JSON for the required schema (${errors.slice(0, 5).join('; ')}). Previous output (may be truncated):\n${clip(out.text, 4000)}\n\nRedo the final answer: reply with ONLY a fenced json code block that validates against the schema.`;
       continue;
     }
     return { ok: false, error: `CLI output failed schema validation: ${errors.slice(0, 5).join('; ')}`, text: out.text };

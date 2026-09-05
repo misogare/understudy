@@ -10,7 +10,8 @@
 //                a policy default, not a sandbox; documented in the README.
 //   full       — everything, no confinement.
 
-import { resolve, relative, isAbsolute } from 'node:path';
+import { resolve, relative, isAbsolute, dirname, basename, join } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
 import { toolRead, toolWrite, toolEdit } from './fs.js';
 import { toolGlob, toolGrep } from './search.js';
 import { toolBash } from './shell.js';
@@ -84,16 +85,28 @@ function defsFor(mode, searchConfigured) {
   return all.map((t) => ({ type: 'function', function: t }));
 }
 
+export const PERMISSION_MODES = ['read-only', 'workspace', 'full'];
+
 export function buildToolset({ cwd, mode = 'workspace', allowPaths = [], config = {}, onEvent = null }) {
+  if (!PERMISSION_MODES.includes(mode)) {
+    // Fail CLOSED: an unrecognized mode must never grant more than intended.
+    throw new Error(`invalid permission mode "${mode}" — use one of: ${PERMISSION_MODES.join(' | ')}`);
+  }
   const searchConfigured = !!(config.search && config.search.type);
-  const roots = [resolve(cwd), ...allowPaths.map((p) => resolve(p))];
+  const roots = [resolve(cwd), ...allowPaths.map((p) => resolve(p))].map(realish);
   const state = { toolCalls: 0 };
 
   const resolvePath = (p) => (isAbsolute(p) ? resolve(p) : resolve(cwd, p));
-  const inRoots = (p) => roots.some((r) => {
-    const rel = relative(r, p);
-    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-  });
+  // Confinement checks run on the REAL path (symlinks/junctions resolved on
+  // the deepest existing ancestor) so a link inside the workspace can't
+  // redirect writes outside it.
+  const inRoots = (p) => {
+    const real = realish(p);
+    return roots.some((r) => {
+      const rel = relative(r, real);
+      return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+    });
+  };
 
   async function execute(name, args) {
     state.toolCalls += 1;
@@ -135,6 +148,21 @@ export function buildToolset({ cwd, mode = 'workspace', allowPaths = [], config 
     execute,
     get toolCallCount() { return state.toolCalls; },
   };
+}
+
+// Resolve the real (symlink-free) path of the deepest existing ancestor,
+// then re-append the not-yet-existing remainder.
+function realish(p) {
+  let cur = resolve(p);
+  const rest = [];
+  while (!existsSync(cur)) {
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    rest.unshift(basename(cur));
+    cur = parent;
+  }
+  try { cur = realpathSync(cur); } catch { /* keep unresolved */ }
+  return rest.length ? join(cur, ...rest) : cur;
 }
 
 function wrap(r) {

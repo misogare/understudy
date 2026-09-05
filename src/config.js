@@ -3,7 +3,7 @@
 // Sources, later wins:
 //   1. ~/.understudy/config.json          (user-global)
 //   2. <walk up from cwd>/understudy.config.json   (project)
-//   3. env: UNDERSTUDY_PROVIDER, UNDERSTUDY_OUT
+//   3. env: UNDERSTUDY_PROVIDER, UNDERSTUDY_OUT (runs root; read in cli.js)
 //
 // understudy.config.json shape:
 // {
@@ -31,8 +31,13 @@ export function findProjectConfig(cwd) {
   }
 }
 
+// Windows editors and PowerShell redirection commonly stamp a UTF-8 BOM.
+export function stripBom(s) {
+  return s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+}
+
 function readJson(p) {
-  try { return JSON.parse(readFileSync(p, 'utf8')); } catch (e) {
+  try { return JSON.parse(stripBom(readFileSync(p, 'utf8'))); } catch (e) {
     throw new Error(`invalid JSON in ${p}: ${e.message}`);
   }
 }
@@ -137,6 +142,21 @@ export function ensureGlobalDir() {
   const dir = join(homedir(), '.understudy');
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+// Make the "your config stays out of git" promise true: append the entries to
+// the project's .gitignore (idempotent). Returns what was done for reporting.
+export function ensureGitignored(cwd, entries = [PROJECT_CONFIG_NAME, '.understudy/']) {
+  if (!existsSync(join(cwd, '.git'))) return { action: 'no-git-repo', added: [] };
+  const path = join(cwd, '.gitignore');
+  const current = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const lines = new Set(current.split(/\r?\n/).map((l) => l.trim()));
+  const added = entries.filter((e) => !lines.has(e) && !lines.has(e.replace(/\/$/, '')));
+  if (added.length) {
+    const suffix = current && !current.endsWith('\n') ? '\n' : '';
+    writeFileSync(path, current + suffix + added.join('\n') + '\n');
+  }
+  return { action: added.length ? 'appended' : 'already-present', added, path };
 }
 
 function strip(s) {

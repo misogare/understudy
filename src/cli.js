@@ -7,11 +7,11 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 
-import { loadConfig, detectProviders, importContinueConfig, writeProjectConfig, PROJECT_CONFIG_NAME } from './config.js';
+import { loadConfig, detectProviders, importContinueConfig, writeProjectConfig, ensureGitignored, stripBom, PROJECT_CONFIG_NAME } from './config.js';
 import { listProviders, resolveProvider } from './providers/index.js';
 import { runWorkflow } from './runtime/workflow.js';
 import { runAgentLoop } from './runtime/agentloop.js';
-import { buildToolset } from './tools/index.js';
+import { buildToolset, PERMISSION_MODES } from './tools/index.js';
 import { loadAgentDef } from './loader/agentmd.js';
 import { findWorkflowScripts, dedupeByName, harvest } from './loader/harvest.js';
 import { listRuns, collectRun } from './handoff/collect.js';
@@ -50,13 +50,17 @@ COMMANDS
                          --schema @file.json   force structured output
                          (accepts the same provider/mode flags as run)
   runs                 List runs under the runs root
-  show <runId>         Show one run's record
+  show <runId>         Show one run's record (--json for the raw record)
   collect [runId]      Print the handoff digest (default: latest run)
                          --json           machine-readable output
   install-skill        Install the Claude Code skill so Claude can drive this
                          --global         into ~/.claude/skills instead of ./.claude/skills
+  --version            Print the version
 
-Docs & examples: https://github.com/  (see README.md in this repo)
+providers/show also accept --json. The runs root can be set per-invocation
+with --out, or via UNDERSTUDY_OUT / config "out".
+
+Docs & examples: see README.md in this repository.
 `;
 
 export async function main(argv = process.argv.slice(2)) {
@@ -83,7 +87,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   const cwd = process.cwd();
   const config = loadConfig(cwd);
-  const outRoot = resolve(flags.out || config.out || join(cwd, '.understudy', 'runs'));
+  const outRoot = resolve(flags.out || process.env.UNDERSTUDY_OUT || config.out || join(cwd, '.understudy', 'runs'));
 
   switch (cmd) {
     case 'init': return cmdInit(cwd, flags);
@@ -118,7 +122,7 @@ function cmdInit(cwd, flags) {
       ? `Imported ${Object.keys(imported.providers).length} provider(s) from ${imported.path}.`
       : 'No ~/.continue/config.yaml found.';
     const withKeys = Object.values(imported.providers).filter((p) => p.apiKey).length;
-    if (withKeys) continueNote += `\n  NOTE: ${withKeys} imported entr${withKeys === 1 ? 'y carries' : 'ies carry'} an inline apiKey copied from Continue's config. ${PROJECT_CONFIG_NAME} is gitignored by default, but moving keys to env vars (apiKeyEnv) is safer.`;
+    if (withKeys) continueNote += `\n  NOTE: ${withKeys} imported entr${withKeys === 1 ? 'y carries' : 'ies carry'} an inline apiKey copied from Continue's config. init adds ${PROJECT_CONFIG_NAME} to your .gitignore, but moving keys to env vars (apiKeyEnv) is safer.`;
   }
 
   const defaultProvider = detected.find((d) => d.name !== 'copilot-cli')?.name
@@ -132,6 +136,9 @@ function cmdInit(cwd, flags) {
   };
   writeProjectConfig(cwd, cfg);
   print(`Wrote ${target}`);
+  const gi = ensureGitignored(cwd);
+  if (gi.action === 'appended') print(`Added ${gi.added.join(', ')} to ${gi.path}`);
+  else if (gi.action === 'no-git-repo') print(`NOTE: no git repo here — if you later init one, add ${PROJECT_CONFIG_NAME} and .understudy/ to its .gitignore.`);
   if (detected.length) {
     print('Detected:');
     for (const d of detected) print(`  - ${d.name}  (${d.why})`);
@@ -205,13 +212,23 @@ async function cmdRun(config, cwd, outRoot, positionals, flags) {
 
   const provider = resolveProvider(config, flags.provider);
   if (flags.model) {
+    // --model FORCES one model for every agent, as documented — including
+    // agents that pass their own opts.model.
     const forced = flags.model;
-    const orig = provider.modelFor.bind(provider);
-    provider.modelFor = (o) => (o && o.model ? orig(o) : forced);
+    provider.modelFor = () => forced;
   }
   const args = parseArgsFlag(flags.args);
   const runId = 'uwf_' + randomBytes(5).toString('hex');
   const mode = flags['read-only'] ? 'read-only' : (flags.mode || config.mode || 'workspace');
+  if (!PERMISSION_MODES.includes(mode)) fail(`invalid --mode "${mode}" — use one of: ${PERMISSION_MODES.join(' | ')}`);
+  if (provider.type === 'cli' && mode === 'read-only') {
+    fail('read-only mode cannot be enforced for CLI providers (their tools run outside understudy). Use an HTTP provider such as deepseek/gemini/glm, or drop --read-only.');
+  }
+  let budgetTotal = null;
+  if (flags.budget != null) {
+    budgetTotal = Number(flags.budget);
+    if (!Number.isFinite(budgetTotal) || budgetTotal <= 0) fail(`--budget must be a positive number of output tokens (got "${flags.budget}")`);
+  }
   mkdirSync(outRoot, { recursive: true });
 
   const resumeJournalPath = flags.resume ? join(outRoot, flags.resume, 'journal.jsonl') : null;
@@ -223,7 +240,7 @@ async function cmdRun(config, cwd, outRoot, positionals, flags) {
   try {
     const { result, record, runDir } = await runWorkflow({
       source, scriptPath, args, provider, config, outRoot, runId,
-      budgetTotal: flags.budget ? Number(flags.budget) : null,
+      budgetTotal,
       mode, cwd,
       resumeJournalPath,
       onLog: (m) => print(`  ${m}`),
@@ -234,10 +251,12 @@ async function cmdRun(config, cwd, outRoot, positionals, flags) {
     });
     print('');
     print(`DONE in ${Math.round((Date.now() - t0) / 1000)}s — ${record.agentCount} agents, ${record.totalToolCalls} tool calls, ${record.totalTokens} tokens`);
-    print(`result:  ${runDir}\\result.json`);
-    print(`summary: ${runDir}\\summary.md`);
+    print(`result:  ${join(runDir, 'result.json')}`);
+    print(`summary: ${join(runDir, 'summary.md')}`);
     const s = typeof result === 'string' ? result : JSON.stringify(result);
     if (s != null) print(`return value: ${s.length > 600 ? s.slice(0, 600) + '…' : s}`);
+    // Force exit: a script that leaked a timer must not hang the CLI.
+    flushThenExit(0);
   } catch (e) {
     print('');
     fail(`workflow failed after ${Math.round((Date.now() - t0) / 1000)}s: ${e.message}\n(partial journal + record in ${join(outRoot, runId)}; fix and resume with --resume ${runId})`);
@@ -248,25 +267,31 @@ async function cmdAgent(config, cwd, outRoot, positionals, flags) {
   const ref = positionals[1];
   if (!ref) fail('usage: understudy agent <name|file.md> --prompt "..."');
   if (!flags.prompt) fail('--prompt is required');
-  const prompt = flags.prompt.startsWith('@') ? readFileSync(flags.prompt.slice(1), 'utf8') : flags.prompt;
-  const schema = flags.schema ? JSON.parse(readFileSync(flags.schema.replace(/^@/, ''), 'utf8')) : undefined;
+  const prompt = flags.prompt.startsWith('@') ? stripBom(readFileSync(flags.prompt.slice(1), 'utf8')) : flags.prompt;
+  const schema = flags.schema ? JSON.parse(stripBom(readFileSync(flags.schema.replace(/^@/, ''), 'utf8'))) : undefined;
   const def = loadAgentDef(ref, cwd);
-  if (!def && ref.endsWith('.md')) fail(`agent definition not found: ${ref}`);
+  if (!def) {
+    fail(`agent definition "${ref}" not found — looked for ${ref.endsWith('.md') ? ref : `.claude/agents/${ref}.md`} in the project and in ~/.claude. Pass a .md path or create the definition.`);
+  }
 
   const provider = resolveProvider(config, flags.provider);
-  const mode = flags['read-only'] ? 'read-only' : (flags.mode || 'workspace');
+  const mode = flags['read-only'] ? 'read-only' : (flags.mode || config.mode || 'workspace');
+  if (!PERMISSION_MODES.includes(mode)) fail(`invalid --mode "${mode}" — use one of: ${PERMISSION_MODES.join(' | ')}`);
+  if (provider.type === 'cli' && mode === 'read-only') {
+    fail('read-only mode cannot be enforced for CLI providers (their tools run outside understudy). Use an HTTP provider, or drop --read-only.');
+  }
   const runId = 'uag_' + randomBytes(5).toString('hex');
   const runDir = join(outRoot, runId);
   mkdirSync(runDir, { recursive: true });
   const usage = { input: 0, output: 0 };
   const toolset = buildToolset({ cwd, mode, allowPaths: config.allowPaths || [], config });
   const out = await runAgentLoop({
-    prompt, label: def?.name || ref, schema, provider,
-    model: provider.modelFor({ model: def?.model, effort: flags.effort }),
-    effort: flags.effort || null, toolset, cwd,
+    prompt, label: def.name || ref, schema, provider,
+    model: provider.modelFor({ model: flags.model || def.model, effort: flags.effort }),
+    effort: flags.effort || null, toolset, cwd, mode,
     maxTurns: flags['max-turns'] ? Number(flags['max-turns']) : config.maxTurnsPerAgent,
     transcriptPath: join(runDir, 'transcript.jsonl'),
-    usage, agentBody: def?.body || null,
+    usage, agentBody: def.body || null,
     temperature: flags.temperature ? Number(flags.temperature) : undefined,
   });
   const value = out.value !== undefined ? out.value : out.text;
@@ -274,6 +299,7 @@ async function cmdAgent(config, cwd, outRoot, positionals, flags) {
   if (!out.ok) fail(`agent failed: ${out.error}\n(transcript in ${runDir})`);
   print(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
   print(`\n[tokens in ${usage.input} / out ${usage.output}] transcript: ${runDir}`);
+  flushThenExit(0);
 }
 
 function cmdRuns(outRoot) {
@@ -289,7 +315,7 @@ function cmdShow(outRoot, positionals, flags) {
   if (c.error) fail(c.error);
   if (flags.json) return print(JSON.stringify(c.record, null, 2));
   const r = c.record;
-  if (!r) fail(`run ${c.run.runId} has no record (crashed early?) — journal: ${c.files.journal}`);
+  if (!r) fail(`run ${c.run.runId} has no readable record${c.recordError ? ` (${c.recordError})` : ' (crashed early?)'} — journal: ${c.files.journal}`);
   print(`${r.workflowName} (${r.runId}) — ${r.status}`);
   print(`provider ${r.defaultModel} | agents ${r.agentCount} | tokens ${r.totalTokens} | ${Math.round(r.durationMs / 1000)}s`);
   if (c.failures.length) {
@@ -308,6 +334,7 @@ function cmdCollect(outRoot, positionals, flags) {
       result: c.record?.result ?? null, failures: c.failures, files: c.files,
     }, null, 2));
   }
+  if (c.recordError) print(`WARNING: ${c.recordError}`);
   if (c.files.summary) print(readFileSync(c.files.summary, 'utf8'));
   else print(`Run ${c.run.runId}: status ${c.run.status}; no summary written. Journal: ${c.files.journal}`);
   if (c.failures.length) print(`\nNOTE: ${c.failures.length} agent(s) failed — treat missing sections accordingly.`);
@@ -330,8 +357,15 @@ function cmdInstallSkill(cwd, flags) {
 
 function parseArgsFlag(v) {
   if (v == null) return undefined;
-  const text = v.startsWith('@') ? readFileSync(v.slice(1), 'utf8') : v;
+  const text = v.startsWith('@') ? stripBom(readFileSync(v.slice(1), 'utf8')) : v;
   try { return JSON.parse(text); } catch { return text; }
+}
+
+// process.exit() can truncate pending stdout on pipes — flush first. Forcing
+// the exit matters: a workflow script that leaked a setInterval/setTimeout
+// would otherwise keep the CLI alive after DONE.
+function flushThenExit(code) {
+  process.stdout.write('', () => process.exit(code));
 }
 
 function pkg() {
