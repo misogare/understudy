@@ -10,7 +10,7 @@
     "node": ">=18.17"
   },
   "scripts": {
-    "test": "node --test test/schema.test.js test/journal.test.js test/workflow.test.js test/agentloop.test.js test/tools.test.js test/fixes.test.js"
+    "test": "node --test test/schema.test.js test/journal.test.js test/workflow.test.js test/agentloop.test.js test/tools.test.js test/fixes.test.js test/session.test.js"
   },
   "keywords": [
     "claude-code",

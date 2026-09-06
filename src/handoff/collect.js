@@ -26,6 +26,7 @@ export function listRuns(outRoot) {
       agents: rec?.agentCount ?? null,
       tokens: rec?.totalTokens ?? null,
       provider: rec?.defaultModel || rec?.provider || '?',
+      session: rec?.session || null,
       mtime: st.mtimeMs,
       dir,
     });
@@ -33,11 +34,23 @@ export function listRuns(outRoot) {
   return out.sort((a, b) => b.mtime - a.mtime);
 }
 
-export function collectRun(outRoot, runId = null) {
+// With no runId: prefer the latest run belonging to `session` (so concurrent
+// sessions each collect their own work); fall back to the global latest with
+// an explicit flag when the session has no runs yet.
+export function collectRun(outRoot, runId = null, session = null) {
   const runs = listRuns(outRoot);
   if (runs.length === 0) return { error: `no runs found under ${outRoot}` };
-  const run = runId ? runs.find((r) => r.runId === runId) : runs[0];
-  if (!run) return { error: `run ${runId} not found; latest is ${runs[0].runId}` };
+  let run;
+  let sessionFallback = false;
+  if (runId) {
+    run = runs.find((r) => r.runId === runId);
+    if (!run) return { error: `run ${runId} not found; latest is ${runs[0].runId}` };
+  } else if (session) {
+    run = runs.find((r) => r.session === session);
+    if (!run) { run = runs[0]; sessionFallback = true; }
+  } else {
+    run = runs[0];
+  }
 
   const recordFile = firstRecord(run.dir);
   let record = null;
@@ -50,6 +63,7 @@ export function collectRun(outRoot, runId = null) {
     run,
     record,
     recordError,
+    sessionFallback,
     failures,
     files: {
       record: recordFile,

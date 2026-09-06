@@ -166,6 +166,22 @@ The corpus of real Claude workflows enforces safety by prompt text only
 
 An unrecognized `--mode` value is an error, never a silent fallback.
 
+## Concurrent sessions
+
+Several Claude Code sessions (or terminals) can drive Understudy in the same
+repo without colliding:
+
+- Every run is tagged with a **session id** — `--session <id>`, else
+  `UNDERSTUDY_SESSION`, else `CLAUDE_CODE_SESSION_ID` (which Claude Code sets
+  automatically in its shells, so tagging is zero-effort there).
+- `understudy collect` / `show` default to *your session's* latest run, not
+  whichever run finished last; `--any` opts out, a runId is always exact.
+- `understudy runs` shows a `sess:` column and filters with `--session`.
+- `understudy scratch` prints (and creates) a per-session private directory,
+  `.understudy/manual/<session-id>/`, for instruction files and manual
+  handoffs — use it instead of shared paths so two sessions never write the
+  same file.
+
 ## Single agents
 
 ```bash

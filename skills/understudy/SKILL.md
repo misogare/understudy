@@ -31,10 +31,29 @@ or headless agent CLIs (freebuff, gemini, copilot). Runs land in
 4. If a run dies partway, resume without re-paying completed agents:
    `understudy run <script.js> --resume <runId> ...`.
 
+## Concurrent sessions — never share paths
+
+Multiple Claude sessions may use understudy in the same repo at once. The
+rules that keep them from clobbering each other:
+
+- Every run is auto-tagged with YOUR session id (CLAUDE_CODE_SESSION_ID is
+  read from the shell environment — you don't need to pass anything).
+- For any manual handoff files (instructions, task lists, intermediate
+  outputs): run `understudy scratch` and use ONLY the directory it prints —
+  it is private to this session (.understudy/manual/<session-id>/). NEVER
+  write to shared paths like .understudy/manual/verify/ — another session
+  may be using them.
+- When telling the user or another agent where files live, give the full
+  session-scoped path, not a generic one.
+
 ## Collecting results
 
-- `understudy collect` prints the latest run's summary; `--json` gives
-  `{runId, status, result, failures, files}`.
+- `understudy collect` prints YOUR session's latest run (it warns and falls
+  back to the global latest only if this session has none; `--any`
+  deliberately collects across sessions; a runId always works directly).
+  `--json` gives `{runId, status, session, result, failures, files}`.
+- `understudy runs` lists all runs with a `sess:` column;
+  `understudy runs --session <id>` filters.
 - Or read the files directly: `.understudy/runs/<runId>/result.json` (the
   workflow's return value), `summary.md`, `journal.jsonl` (per-agent
   results), `agents/*.jsonl` (full transcripts).

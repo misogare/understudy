@@ -25,6 +25,7 @@ function renderSummary(r) {
   lines.push(`- run id: ${r.runId}`);
   lines.push(`- status: ${r.status}${r.error ? ` — ${r.error}` : ''}`);
   lines.push(`- provider: ${r.defaultModel}`);
+  if (r.session) lines.push(`- session: ${r.session}`);
   lines.push(`- agents run: ${r.agentCount}, tool calls: ${r.totalToolCalls}, tokens: ${r.totalTokens} (in ${r.usage?.input ?? '?'} / out ${r.usage?.output ?? '?'})`);
   lines.push(`- duration: ${Math.round(r.durationMs / 1000)}s, started ${r.startTime}`);
   if (r.scriptPath) lines.push(`- script: ${basename(r.scriptPath)}`);

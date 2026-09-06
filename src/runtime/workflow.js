@@ -176,7 +176,7 @@ export async function runWorkflow({
   outRoot, runId, budgetTotal = null, mode = 'workspace', cwd = process.cwd(),
   resumeJournalPath = null, onLog = () => {}, defaultEffort = null,
   temperature = undefined, maxTurns = undefined, concurrency = undefined,
-  depth = 0, shared = null,
+  session = null, depth = 0, shared = null,
 }) {
   const { meta, error: metaError } = extractMeta(source);
   if (metaError && !meta) throw new Error(metaError);
@@ -327,7 +327,7 @@ export async function runWorkflow({
       source: childSource, scriptPath: childPath, args: childArgs, provider, config,
       outRoot, runId: `${runId}-sub${st.agentSeq}`, budgetTotal, mode, cwd,
       onLog: (m) => onLog(`  ▸ ${m}`), defaultEffort, temperature, maxTurns,
-      depth: depth + 1, shared: st,
+      session, depth: depth + 1, shared: st,
     });
     return child.result;
   }
@@ -391,6 +391,7 @@ export async function runWorkflow({
     summary: errorMsg ? `FAILED: ${errorMsg}` : summarize(result),
     workflowName: meta.name,
     status,
+    ...(session ? { session } : {}),
     ...(errorMsg ? { error: errorMsg } : {}),
     startTime: startISO,
     phases: meta.phases || [],

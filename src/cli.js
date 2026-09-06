@@ -15,6 +15,7 @@ import { buildToolset, PERMISSION_MODES } from './tools/index.js';
 import { loadAgentDef } from './loader/agentmd.js';
 import { findWorkflowScripts, dedupeByName, harvest } from './loader/harvest.js';
 import { listRuns, collectRun } from './handoff/collect.js';
+import { resolveSession, shortSession } from './session.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -49,16 +50,26 @@ COMMANDS
                          --prompt <text> | --prompt @file   (required)
                          --schema @file.json   force structured output
                          (accepts the same provider/mode flags as run)
-  runs                 List runs under the runs root
+  runs                 List runs under the runs root (--session <id> filters)
   show <runId>         Show one run's record (--json for the raw record)
-  collect [runId]      Print the handoff digest (default: latest run)
+  collect [runId]      Print the handoff digest. With no runId: the CURRENT
+                       SESSION's latest run (falls back to global latest with
+                       a warning); --any forces global latest
                          --json           machine-readable output
+  scratch              Print (and create) this session's private handoff dir
+                       (.understudy/manual/<session>/) — use it instead of
+                       shared paths so concurrent sessions never collide
   install-skill        Install the Claude Code skill so Claude can drive this
                          --global         into ~/.claude/skills instead of ./.claude/skills
   --version            Print the version
 
 providers/show also accept --json. The runs root can be set per-invocation
 with --out, or via UNDERSTUDY_OUT / config "out".
+
+SESSIONS: every run is tagged with a session id — --session <id>, else
+UNDERSTUDY_SESSION, else CLAUDE_CODE_SESSION_ID (set automatically inside
+Claude Code shells). Concurrent sessions therefore keep separate runs,
+collect their own latest by default, and get private scratch dirs.
 
 Docs & examples: see README.md in this repository.
 `;
@@ -77,6 +88,7 @@ export async function main(argv = process.argv.slice(2)) {
       dest: { type: 'string' }, project: { type: 'string' }, 'claude-dir': { type: 'string' },
       list: { type: 'boolean' }, json: { type: 'boolean' }, force: { type: 'boolean' },
       'from-continue': { type: 'boolean' }, global: { type: 'boolean' },
+      session: { type: 'string' }, any: { type: 'boolean' },
       help: { type: 'boolean' }, version: { type: 'boolean' },
     },
   });
@@ -95,9 +107,10 @@ export async function main(argv = process.argv.slice(2)) {
     case 'harvest': return cmdHarvest(flags);
     case 'run': return cmdRun(config, cwd, outRoot, positionals, flags);
     case 'agent': return cmdAgent(config, cwd, outRoot, positionals, flags);
-    case 'runs': return cmdRuns(outRoot);
+    case 'runs': return cmdRuns(outRoot, flags);
     case 'show': return cmdShow(outRoot, positionals, flags);
     case 'collect': return cmdCollect(outRoot, positionals, flags);
+    case 'scratch': return cmdScratch(cwd, flags);
     case 'install-skill': return cmdInstallSkill(cwd, flags);
     default:
       fail(`unknown command "${cmd}" — run \`understudy help\``);
@@ -234,14 +247,15 @@ async function cmdRun(config, cwd, outRoot, positionals, flags) {
   const resumeJournalPath = flags.resume ? join(outRoot, flags.resume, 'journal.jsonl') : null;
   if (flags.resume && !existsSync(resumeJournalPath)) fail(`no journal for run ${flags.resume} under ${outRoot}`);
 
+  const session = resolveSession(flags.session);
   print(`run ${runId}: ${scriptPath}`);
-  print(`provider ${provider.name} | mode ${mode} | out ${join(outRoot, runId)}`);
+  print(`provider ${provider.name} | mode ${mode} | session ${shortSession(session)} | out ${join(outRoot, runId)}`);
   const t0 = Date.now();
   try {
     const { result, record, runDir } = await runWorkflow({
       source, scriptPath, args, provider, config, outRoot, runId,
       budgetTotal,
-      mode, cwd,
+      mode, cwd, session,
       resumeJournalPath,
       onLog: (m) => print(`  ${m}`),
       defaultEffort: flags.effort || null,
@@ -295,24 +309,29 @@ async function cmdAgent(config, cwd, outRoot, positionals, flags) {
     temperature: flags.temperature ? Number(flags.temperature) : undefined,
   });
   const value = out.value !== undefined ? out.value : out.text;
-  writeFileSync(join(runDir, 'result.json'), JSON.stringify({ ok: out.ok, error: out.error || null, value }, null, 2));
+  const session = resolveSession(flags.session);
+  writeFileSync(join(runDir, 'result.json'), JSON.stringify({ ok: out.ok, error: out.error || null, ...(session ? { session } : {}), value }, null, 2));
   if (!out.ok) fail(`agent failed: ${out.error}\n(transcript in ${runDir})`);
   print(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
   print(`\n[tokens in ${usage.input} / out ${usage.output}] transcript: ${runDir}`);
   flushThenExit(0);
 }
 
-function cmdRuns(outRoot) {
-  const runs = listRuns(outRoot);
-  if (!runs.length) return print(`No runs under ${outRoot}`);
+function cmdRuns(outRoot, flags = {}) {
+  let runs = listRuns(outRoot);
+  const filter = flags.session ? resolveSession(flags.session) : null;
+  if (filter) runs = runs.filter((r) => r.session === filter);
+  if (!runs.length) return print(`No runs${filter ? ` for session ${filter}` : ''} under ${outRoot}`);
   for (const r of runs) {
-    print(`${r.runId}  ${String(r.status).padEnd(10)} ${String(r.name).padEnd(30)} agents:${r.agents ?? '?'} tokens:${r.tokens ?? '?'}  ${r.provider}`);
+    print(`${r.runId}  ${String(r.status).padEnd(10)} ${String(r.name).padEnd(30)} sess:${shortSession(r.session)} agents:${r.agents ?? '?'} tokens:${r.tokens ?? '?'}  ${r.provider}`);
   }
 }
 
 function cmdShow(outRoot, positionals, flags) {
-  const c = collectRun(outRoot, positionals[1] || null);
+  const session = flags.any ? null : resolveSession(flags.session);
+  const c = collectRun(outRoot, positionals[1] || null, session);
   if (c.error) fail(c.error);
+  if (c.sessionFallback) print(`NOTE: no runs for session ${shortSession(session)} — showing the latest run overall (session ${shortSession(c.run.session)}). Use --any to silence this.`);
   if (flags.json) return print(JSON.stringify(c.record, null, 2));
   const r = c.record;
   if (!r) fail(`run ${c.run.runId} has no readable record${c.recordError ? ` (${c.recordError})` : ' (crashed early?)'} — journal: ${c.files.journal}`);
@@ -326,19 +345,32 @@ function cmdShow(outRoot, positionals, flags) {
 }
 
 function cmdCollect(outRoot, positionals, flags) {
-  const c = collectRun(outRoot, positionals[1] || null);
+  const session = flags.any ? null : resolveSession(flags.session);
+  const c = collectRun(outRoot, positionals[1] || null, session);
   if (c.error) fail(c.error);
   if (flags.json) {
     return print(JSON.stringify({
       runId: c.run.runId, status: c.run.status, workflowName: c.run.name,
+      session: c.run.session || null, sessionFallback: !!c.sessionFallback,
       result: c.record?.result ?? null, failures: c.failures, files: c.files,
     }, null, 2));
   }
+  if (c.sessionFallback) print(`NOTE: no runs for session ${shortSession(session)} — collecting the latest run overall (session ${shortSession(c.run.session)}). Use --any to silence this.`);
   if (c.recordError) print(`WARNING: ${c.recordError}`);
   if (c.files.summary) print(readFileSync(c.files.summary, 'utf8'));
   else print(`Run ${c.run.runId}: status ${c.run.status}; no summary written. Journal: ${c.files.journal}`);
   if (c.failures.length) print(`\nNOTE: ${c.failures.length} agent(s) failed — treat missing sections accordingly.`);
   print(`\nFull result: ${c.files.result}`);
+}
+
+function cmdScratch(cwd, flags) {
+  const session = resolveSession(flags.session);
+  if (!session) {
+    fail('no session id available — pass --session <id> or set UNDERSTUDY_SESSION. (Inside Claude Code shells, CLAUDE_CODE_SESSION_ID is picked up automatically.)');
+  }
+  const dir = join(cwd, '.understudy', 'manual', session);
+  mkdirSync(dir, { recursive: true });
+  print(dir);
 }
 
 function cmdInstallSkill(cwd, flags) {
